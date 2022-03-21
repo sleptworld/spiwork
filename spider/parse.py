@@ -1,6 +1,6 @@
-import threading
-import asyncio
 from collections.abc import Callable
+from multiprocessing import Process
+from multiprocessing import JoinableQueue, Pipe
 
 
 class OutPutItem:
@@ -11,6 +11,7 @@ class OutPutItem:
 class FrontItem:
     def __init__(
         self,
+        status_code: int,
         contentType: str,
         content: str,
         parserFunction: Callable[[str], OutPutItem],
@@ -18,38 +19,74 @@ class FrontItem:
         self.type = contentType
         self.content = content
         self.parserFunction = parserFunction
+        self.status_code = status_code
+
+
+class EndOfItmeLines(FrontItem):
+    def __init__(
+        self,
+        status_code=None,
+        contentType=None,
+        content=None,
+        parserFunction=None,
+    ):
+        super().__init__(status_code, contentType, content, parserFunction)
+
+
+def parsing(queue, conn):
+    while True:
+
+        try:
+            item: FrontItem = queue.get()
+
+            if isinstance(item, EndOfItmeLines):
+                break
+
+            item.parserFunction(item.content)
+
+        except:
+            print("something wrong")
+
+        finally:
+            queue.task_done()
 
 
 class ParseConnector:
-    def __init__(self, loop, tr=None):
-        self.__queue = asyncio.Queue()
-        self.__loop = loop
-        if tr is None:
-            self.__threading = threading.Thread(
-                target=__NewTr,
-                args=(loop,),
-            )
-            self.__threading.daemon = True
+    def __init__(self, process=None, conn=None, queue=None):
+        self.process = process
+        self.conn = conn
+        self.queue = queue
+        self.finished = False
 
-        else:
-            self.__threading = tr
+    def __del__(self):
+        self.conn.close()
+        self.process.close()
 
-        self.__threading.start()
-
-    async def add(self, item: FrontItem):
-        await self.__queue.put(item)
-
-    async def parsing(self):
-        while True:
-            item: FrontItem = await self.__queue.get()
-            item.parserFunction(item.content)
-            self.__queue.task_done()
-        await self.__queue.join()
+    def add(self, item: FrontItem):
+        self.queue.put(item)
+        if isinstance(item, EndOfItmeLines):
+            self.finished = True
 
     def start_parse(self):
-        asyncio.run_coroutine_threadsafe(self.parsing(), self.__loop)
 
+        if self.conn is None:
+            parent_conn, child_conn = Pipe()
+            self.conn = parent_conn
 
-def __NewTr(loop: asyncio.AbstractEventLoop):
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
+        if self.queue is None:
+            self.queue = JoinableQueue()
+
+        if self.process is None:
+            self.process = Process(
+                target=parsing,
+                args=(
+                    self.queue,
+                    child_conn,
+                ),
+            )
+            self.process.daemon = True
+
+            self.process.start()
+
+    def is_parsing(self):
+        return self.finished
